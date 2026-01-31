@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Smart Ebook Reader</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+<link rel="stylesheet"
+ href="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf_viewer.min.css"/>
+
+<style>
+:root {
+  --bg:#f4f1ec; --paper:#fff; --text:#1f2937;
+}
+body.night {
+  --bg:#0f172a; --paper:#020617; --text:#e5e7eb;
+}
+body {
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:Georgia,serif;
+}
+header {
+  background:#111827; color:white; padding:10px;
+  display:flex; gap:8px; align-items:center;
+}
+header button,input { padding:6px 10px; border-radius:6px; border:none; }
+header button { background:#1f2937; color:white; cursor:pointer; }
+
+#viewer { max-width:900px; margin:30px auto; }
+.page { position:relative; margin-bottom:40px; }
+
+.textLayer {
+  position:absolute; inset:0; color:transparent;
+  user-select:text; cursor:text; line-height:1;
+}
+.textLayer span::selection {
+  background:rgba(66,133,244,.35);
+}
+
+#popup {
+  position:absolute; background:var(--paper); color:var(--text);
+  padding:14px; border-radius:10px;
+  box-shadow:0 15px 40px rgba(0,0,0,.3);
+  max-width:320px; display:none; z-index:9999;
+}
+#popup audio { width:100%; margin-top:6px; }
+</style>
+</head>
+
+<body>
+
+<header>
+📘 Smart Ebook Reader
+<input type="file" id="fileInput" accept=".pdf,image/*">
+<button onclick="prevPage()">◀</button>
+<span id="pageInfo">–</span>
+<button onclick="nextPage()">▶</button>
+<button onclick="zoomOut()">−</button>
+<button onclick="zoomIn()">+</button>
+<button onclick="toggleNight()">🌙</button>
+</header>
+
+<div id="viewer"></div>
+<div id="popup"></div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+ "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+
+const viewer = document.getElementById("viewer");
+const popup = document.getElementById("popup");
+const pageInfo = document.getElementById("pageInfo");
+
+let pdfDoc=null, currentPage=1;
+let DISPLAY_SCALE=1.4;
+const RENDER_SCALE=2.2;
+const DPR=window.devicePixelRatio||1;
+
+fileInput.onchange = async e => {
+  const file=e.target.files[0];
+  viewer.innerHTML=""; popup.style.display="none";
+
+  if(file.type==="application/pdf"){
+    const url=URL.createObjectURL(file);
+    pdfDoc=await pdfjsLib.getDocument(url).promise;
+    currentPage=1; renderPage();
+  }
+
+  if(file.type.startsWith("image/")){
+    const fd=new FormData(); fd.append("file",file);
+    const r=await fetch("http://127.0.0.1:8000/ocr-image",{method:"POST",body:fd});
+    viewer.innerText=(await r.json()).text;
+  }
+};
+
+async function renderPage(){
+  viewer.innerHTML="";
+  pageInfo.textContent=`${currentPage}/${pdfDoc.numPages}`;
+  const page=await pdfDoc.getPage(currentPage);
+
+  const viewport=page.getViewport({scale:DISPLAY_SCALE});
+  const renderViewport=page.getViewport({scale:RENDER_SCALE*DPR});
+
+  const pageDiv=document.createElement("div");
+  pageDiv.className="page";
+  pageDiv.style.width=viewport.width+"px";
+  pageDiv.style.margin="0 auto";
+
+  const canvas=document.createElement("canvas");
+  const ctx=canvas.getContext("2d",{alpha:false});
+  canvas.width=renderViewport.width;
+  canvas.height=renderViewport.height;
+  canvas.style.width=viewport.width+"px";
+  canvas.style.height=viewport.height+"px";
+
+  ctx.setTransform(
+    renderViewport.width/viewport.width,0,
+    0,renderViewport.height/viewport.height,0,0
+  );
+  ctx.imageSmoothingEnabled=true;
+  ctx.imageSmoothingQuality="high";
+
+  await page.render({canvasContext:ctx,viewport}).promise;
+
+  const textLayer=document.createElement("div");
+  textLayer.className="textLayer";
+  textLayer.style.width=viewport.width+"px";
+  textLayer.style.height=viewport.height+"px";
+
+  const textContent=await page.getTextContent();
+  pdfjsLib.renderTextLayer({textContent,container:textLayer,viewport,textDivs:[]});
+
+  pageDiv.append(canvas,textLayer);
+  viewer.appendChild(pageDiv);
+}
+
+/* NAVIGATION */
+function nextPage(){ if(currentPage<pdfDoc.numPages){currentPage++;renderPage();}}
+function prevPage(){ if(currentPage>1){currentPage--;renderPage();}}
+
+/* ZOOM */
+function zoomIn(){ DISPLAY_SCALE=Math.min(DISPLAY_SCALE+.1,2); renderPage();}
+function zoomOut(){ DISPLAY_SCALE=Math.max(DISPLAY_SCALE-.1,1); renderPage();}
+
+/* NIGHT MODE */
+function toggleNight(){ document.body.classList.toggle("night"); }
+
+/* 🔑 CLEAN WORD SELECTION */
+document.addEventListener("mouseup",()=>{
+  const sel=window.getSelection();
+  if(!sel.rangeCount) return;
+
+  let text=sel.toString().toLowerCase().replace(/[^a-z]/g," ").split(" ").find(w=>w.length>1);
+  if(!text){ popup.style.display="none"; return; }
+
+  const rect=sel.getRangeAt(0).getBoundingClientRect();
+  fetch(`http://127.0.0.1:8000/define?word=${text}`)
+    .then(r=>r.json())
+    .then(d=>{
+      popup.innerHTML=`
+<b>${d.word}</b><br>
+<small>${d.pos||""}</small><br><br>
+<b>Meaning:</b><br>${d.meaning}<br><br>
+${d.examples?.length?`<b>Example:</b><br>“${d.examples[0]}”<br><br>`:""}
+${d.synonyms?.length?`<b>Synonyms:</b><br>${d.synonyms.join(", ")}<br><br>`:""}
+${d.antonyms?.length?`<b>Antonyms:</b><br>${d.antonyms.join(", ")}<br><br>`:""}
+${d.pronunciation?`<audio controls src="${d.pronunciation}"></audio>`:""}
+`;
+      popup.style.left=rect.left+window.scrollX+"px";
+      popup.style.top=rect.bottom+window.scrollY+8+"px";
+      popup.style.display="block";
+    });
+});
+
+document.addEventListener("mousedown",e=>{
+  if(!popup.contains(e.target)) popup.style.display="none";
+});
+</script>
+
+</body>
+</html>
